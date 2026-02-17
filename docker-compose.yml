@@ -1,0 +1,189 @@
+version: '3.8'
+
+services:
+  # ---------------------------------------------------------------------------
+  # REVERSE PROXY (Entry Point)
+  # ---------------------------------------------------------------------------
+  nginx:
+    image: nginx:latest
+    container_name: rag_nginx
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - webui
+      - keycloak
+      - llamaindex
+    networks:
+      - rag_net
+    restart: always
+
+  # ---------------------------------------------------------------------------
+  # LLM RUNTIME
+  # ---------------------------------------------------------------------------
+  ollama:
+    image: ollama/ollama:latest
+    container_name: rag_ollama
+    volumes:
+      - ollama_data:/root/.ollama
+    networks:
+      - rag_net
+    expose:
+      - "11434"
+    environment:
+      - OLLAMA_KEEP_ALIVE=24h
+    restart: always
+
+  # ---------------------------------------------------------------------------
+  # VECTOR DATABASE
+  # ---------------------------------------------------------------------------
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: rag_qdrant
+    volumes:
+      - qdrant_data:/qdrant/storage
+    networks:
+      - rag_net
+    expose:
+      - "6333"
+    environment:
+      - QDRANT__SERVICE__GRPC_PORT=6334
+    restart: always
+
+  # ---------------------------------------------------------------------------
+  # EMBEDDING SERVICE (HuggingFace)
+  # ---------------------------------------------------------------------------
+  embedding:
+    image: ghcr.io/huggingface/text-embeddings-inference:cpu-1.6
+    container_name: rag_embedding
+    command: --model-id BAAI/bge-m3 --port 80
+    networks:
+      - rag_net
+    expose:
+      - "80"
+    volumes:
+      - embedding_data:/data
+    restart: always
+
+  # ---------------------------------------------------------------------------
+  # OBJECT STORAGE
+  # ---------------------------------------------------------------------------
+  minio:
+    image: minio/minio:latest
+    container_name: rag_minio
+    command: server /data --console-address ":9001"
+    volumes:
+      - minio_data:/data
+    networks:
+      - rag_net
+    expose:
+      - "9000"
+      - "9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:9000/minio/health/live" ]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+    restart: always
+
+  # ---------------------------------------------------------------------------
+  # AUTHENTICATION
+  # ---------------------------------------------------------------------------
+  keycloak:
+    image: quay.io/keycloak/keycloak:24.0
+    container_name: rag_keycloak
+    user: root
+    command: start-dev
+    environment:
+      KC_DB: dev-file
+      KEYCLOAK_ADMIN: ${KEYCLOAK_ADMIN}
+      KEYCLOAK_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD}
+      KC_PROXY: edge
+      KC_HTTP_RELATIVE_PATH: /auth
+      KC_HOSTNAME: localhost
+      KC_HOSTNAME_STRICT: "false"
+      KC_HOSTNAME_STRICT_HTTPS: "false"
+    networks:
+      - rag_net
+    expose:
+      - "8080"
+    volumes:
+      - keycloak_data:/opt/keycloak/data/h2
+    restart: always
+
+  # ---------------------------------------------------------------------------
+  # RAG API SERVICE (Custom LlamaIndex)
+  # ---------------------------------------------------------------------------
+  llamaindex:
+    build:
+      context: ./src/llamaindex
+      dockerfile: Dockerfile
+    container_name: rag_llamaindex
+    depends_on:
+      ollama:
+        condition: service_started
+      qdrant:
+        condition: service_started
+      minio:
+        condition: service_healthy
+      keycloak:
+        condition: service_started
+      embedding:
+        condition: service_started
+    networks:
+      - rag_net
+    expose:
+      - "8000"
+    environment:
+      - OLLAMA_BASE_URL=http://ollama:11434
+      - QDRANT_URL=http://qdrant:6333
+      - MINIO_ENDPOINT=minio:9000
+      - MINIO_ACCESS_KEY=${MINIO_ROOT_USER}
+      - MINIO_SECRET_KEY=${MINIO_ROOT_PASSWORD}
+      - EMBEDDING_URL=http://embedding:80
+      - KEYCLOAK_URL=http://keycloak:8080
+      - KEYCLOAK_REALM=rag-realm
+      - KEYCLOAK_CLIENT_ID=rag-client
+    volumes:
+      # Mount source for dev/hot-reload if using uvicorn --reload
+      - ./src/llamaindex:/app
+    restart: always
+
+  # ---------------------------------------------------------------------------
+  # OPEN WEBUI
+  # ---------------------------------------------------------------------------
+  webui:
+    image: ghcr.io/open-webui/open-webui:main
+    container_name: rag_webui
+    volumes:
+      - webui_data:/app/backend/data
+    networks:
+      - rag_net
+    expose:
+      - "8080"
+    environment:
+      - OPENAI_API_BASE_URL=http://llamaindex:8000/v1
+      - OPENAI_API_KEY=sk-placeholder # Key is ignored by our API but required by WebUI
+      - OLLAMA_BASE_URL=http://ollama:11434
+      # We tell WebUI to use this base URL which mimics OpenAI.
+      # The "model" parameter sent by WebUI will be passed to our API.
+      - DEFAULT_MODELS=mistral
+    restart: always
+
+networks:
+  rag_net:
+    driver: bridge
+    internal: false # Needs to be accessible by host via port mapping on Nginx
+
+volumes:
+  ollama_data:
+  qdrant_data:
+  embedding_data:
+  minio_data:
+  keycloak_data:
+  webui_data:
