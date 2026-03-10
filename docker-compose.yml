@@ -46,6 +46,8 @@ services:
       - qdrant_data:/qdrant/storage
     networks:
       - rag_net
+    ports:
+      - "6333:6333"
     expose:
       - "6333"
     environment:
@@ -149,6 +151,7 @@ services:
       - KEYCLOAK_URL=http://keycloak:8080
       - KEYCLOAK_REALM=rag-realm
       - KEYCLOAK_CLIENT_ID=rag-client
+      - OLLAMA_MODEL=${OLLAMA_MODEL:-mistral}
     volumes:
       # Mount source for dev/hot-reload if using uvicorn --reload
       - ./src/llamaindex:/app
@@ -172,7 +175,25 @@ services:
       - OLLAMA_BASE_URL=http://ollama:11434
       # We tell WebUI to use this base URL which mimics OpenAI.
       # The "model" parameter sent by WebUI will be passed to our API.
-      - DEFAULT_MODELS=mistral
+      - DEFAULT_MODELS=qwen2.5:1.5b;qwen2.5:0.5b
+      - VECTOR_DB=qdrant
+      - QDRANT_URI=http://qdrant:6333
+      - ENABLE_RAG_WEB_SEARCH=True
+      - RAG_WEB_SEARCH_ENGINE=searxng
+      - SEARXNG_QUERY_URL=http://searxng:8080/search?q=<query>
+    restart: always
+
+  searxng:
+    container_name: rag_searxng
+    image: searxng/searxng:latest
+    networks:
+      - rag_net
+    expose:
+      - "8080"
+    volumes:
+      - ./searxng:/etc/searxng:rw
+    environment:
+      - SEARXNG_BASE_URL=http://searxng:8080
     restart: always
 
 networks:

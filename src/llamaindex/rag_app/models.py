@@ -60,6 +60,24 @@ class ChatCompletionResponse(BaseModel):
     choices: List[Choice]
     usage: Usage
 
+# --- Streaming Models ---
+
+class DeltaMessage(BaseModel):
+    role: Optional[Literal["system", "user", "assistant"]] = None
+    content: Optional[str] = None
+
+class ChatCompletionChunkChoice(BaseModel):
+    index: int
+    delta: DeltaMessage
+    finish_reason: Optional[str] = None
+
+class ChatCompletionChunk(BaseModel):
+    id: str = Field(default_factory=lambda: f"chatcmpl-{int(time.time())}")
+    object: str = "chat.completion.chunk"
+    created: int = Field(default_factory=lambda: int(time.time()))
+    model: str
+    choices: List[ChatCompletionChunkChoice]
+
 class Model(BaseModel):
     id: str
     object: str = "model"

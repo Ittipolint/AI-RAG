@@ -1,0 +1,33 @@
+# SearXNG settings
+
+use_default_settings: true
+
+server:
+  port: 8080
+  bind_address: "0.0.0.0"
+  secret_key: "my_actual_secret_key_123" # Updated from default
+  base_url: http://searxng:8080
+
+search:
+  safe_search: 0
+  autocomplete: ""
+  formats:
+    - html
+    - json
+
+engines:
+  - name: google
+    engine: google
+    shortcut: g
+  - name: duckduckgo
+    engine: duckduckgo
+    shortcut: ddg
+  - name: bing
+    engine: bing
+    shortcut: b
+
+ui:
+  static_use_hash: true
+
+enabled_plugins:
+  - 'Basic Health Check'

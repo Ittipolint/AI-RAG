@@ -1,4 +1,7 @@
-from fastapi import APIRouter, UploadFile, File, Depends, HTTPException
+from fastapi import APIRouter, UploadFile, File, Depends, HTTPException, Response
+from fastapi.responses import StreamingResponse
+import json
+import time
 from typing import Annotated, List
 from .models import (
     IngestResponse, 
@@ -10,7 +13,10 @@ from .models import (
     Message,
     Usage,
     Model,
-    ModelList
+    ModelList,
+    ChatCompletionChunk,
+    ChatCompletionChunkChoice,
+    DeltaMessage
 )
 from .core import rag_service
 from .auth import get_current_user
@@ -43,7 +49,7 @@ async def query_knowledge_base(
     current_user: dict = Depends(get_current_user)
 ):
     try:
-        result = rag_service.query(request.query, request.similarity_top_k)
+        result = await rag_service.query(request.query, request.similarity_top_k)
         return result
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -54,9 +60,13 @@ async def health_check():
 
 @router.get("/v1/models", response_model=ModelList)
 async def list_models():
-    return ModelList(data=[Model(id="mistral")])
+    # Give it a unique, obvious name so the user selects this API instead of raw Ollama
+    models = [
+        Model(id="🌐 RAG + Internet Search (Qwen 2.5)"),
+    ]
+    return ModelList(data=models)
 
-@router.post("/v1/chat/completions", response_model=ChatCompletionResponse)
+@router.post("/v1/chat/completions")
 async def chat_completions(
     request: ChatCompletionRequest
 ):
@@ -68,21 +78,57 @@ async def chat_completions(
         
         query_text = last_message.content
 
-        # 2. Query RAG Service
-        # We use a default top_k or could infer from request if needed
-        result = rag_service.query(query_text, top_k=3)
+        # 2. Handle Streaming
+        if request.stream:
+            async def stream_generator():
+                try:
+                    response_gen = await rag_service.astream_query(query_text, top_k=3)
+                    chunk_id = f"chatcmpl-{int(time.time())}"
+                    
+                    # Yield role first
+                    start_chunk = ChatCompletionChunk(
+                        id=chunk_id, 
+                        model=request.model, 
+                        choices=[ChatCompletionChunkChoice(index=0, delta=DeltaMessage(role='assistant'), finish_reason=None)]
+                    )
+                    yield f"data: {start_chunk.model_dump_json()}\n\n"
 
-        # 3. Format Response
-        # Append sources to the response text for visibility in WebUI
+                    # Iterating over async generator
+                    async for text in response_gen:
+                        if not text:
+                            continue
+                        chunk = ChatCompletionChunk(
+                            id=chunk_id,
+                            model=request.model,
+                            choices=[ChatCompletionChunkChoice(index=0, delta=DeltaMessage(content=str(text)), finish_reason=None)]
+                        )
+                        yield f"data: {chunk.model_dump_json()}\n\n"
+                    
+                    end_chunk = ChatCompletionChunk(
+                        id=chunk_id, 
+                        model=request.model, 
+                        choices=[ChatCompletionChunkChoice(index=0, delta=DeltaMessage(), finish_reason='stop')]
+                    )
+                    yield f"data: {end_chunk.model_dump_json()}\n\n"
+                    yield "data: [DONE]\n\n"
+                except Exception as e:
+                    print(f"STREAMING ERROR: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    yield f"data: {json.dumps({'error': str(e)})}\n\n"
+                    yield "data: [DONE]\n\n"
+
+            return StreamingResponse(stream_generator(), media_type="text/event-stream")
+
+        # 3. Handle Non-Streaming
+        result = await rag_service.query(query_text, top_k=3)
         final_response_text = result.response
         if result.sources:
             final_response_text += "\n\n**Sources:**\n"
             for i, source in enumerate(result.sources, 1):
-                # Truncate source text if too long
                 snippet = source.text[:200] + "..." if len(source.text) > 200 else source.text
                 final_response_text += f"{i}. {snippet}\n"
 
-        # 4. Construct OpenAI-compatible response
         return ChatCompletionResponse(
             model=request.model,
             choices=[
@@ -95,7 +141,7 @@ async def chat_completions(
                     finish_reason="stop"
                 )
             ],
-            usage=Usage() # We don't track tokens yet
+            usage=Usage()
         )
 
     except Exception as e:
